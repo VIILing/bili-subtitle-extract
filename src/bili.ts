@@ -389,6 +389,58 @@ async function health(): Promise<BiliHealth> {
   }
 }
 
+interface ProbeAttempt {
+  status: number;
+  code: number | null;
+  snippet: string;
+}
+
+interface ProbeResult {
+  url: string;
+  fetch: ProbeAttempt;
+  socket: ProbeAttempt;
+}
+
+function parseCode(text: string): number | null {
+  try {
+    const payload = JSON.parse(text) as { code?: number };
+    return typeof payload?.code === 'number' ? payload.code : null;
+  } catch {
+    return null;
+  }
+}
+
+async function probeOne(url: string): Promise<ProbeResult> {
+  let fetchAttempt: ProbeAttempt;
+  try {
+    const response = await fetchWithTimeout(url, { headers: COMMON_HEADERS, redirect: 'follow' }, 10000);
+    const text = await response.text();
+    fetchAttempt = { status: response.status, code: parseCode(text), snippet: text.slice(0, 220) };
+  } catch (error) {
+    fetchAttempt = { status: 0, code: null, snippet: String((error as Error)?.message ?? error) };
+  }
+
+  let socketAttempt: ProbeAttempt;
+  try {
+    const response = await socketHttpGet(url, COMMON_HEADERS, 10000);
+    socketAttempt = { status: response.status, code: parseCode(response.text), snippet: response.text.slice(0, 220) };
+  } catch (error) {
+    socketAttempt = { status: 0, code: null, snippet: String((error as Error)?.message ?? error) };
+  }
+
+  return { url: url.split('?')[0], fetch: fetchAttempt, socket: socketAttempt };
+}
+
+/**
+ * 诊断用：分别用 fetch / 原始 TCP+TLS 请求 nav、view、dm/view，返回状态码与响应片段。
+ * 暴露在 GET /api/health?probe=1&bvid=...&cid=...（只用于排查 412）。
+ */
+export async function probeBili(bvid: string, cid?: number): Promise<ProbeResult[]> {
+  const results = [await probeOne(NAV_URL), await probeOne(`${VIEW_URL}?bvid=${encodeURIComponent(bvid)}`)];
+  if (cid) results.push(await probeOne(`${DM_VIEW_URL}?oid=${cid}&type=1`));
+  return results;
+}
+
 /** 生产环境实现：使用全局 fetch（Worker / Node 18+ 均可） */
 export function createBiliClient(): BiliClient {
   return { resolveMeta, fetchTrackUrl, downloadCues, health };

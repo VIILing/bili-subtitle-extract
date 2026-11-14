@@ -8,7 +8,7 @@
  */
 
 import { authFailureMessage, verifyToken } from './auth';
-import { pickTrack } from './bili';
+import { pickTrack, probeBili } from './bili';
 import type { BiliClient } from './bili';
 import { ApiError } from './errors';
 import { metaCacheKey, subtitleCacheKey } from './store';
@@ -228,14 +228,25 @@ async function handleSubtitles(request: Request, deps: AppDeps): Promise<Respons
   }
 }
 
-async function handleHealth(deps: AppDeps): Promise<Response> {
+async function handleHealth(deps: AppDeps, request: Request): Promise<Response> {
   const bilibili = await deps.bili.health();
-  return jsonResponse({
+  const params = new URL(request.url).searchParams;
+  const payload: Record<string, unknown> = {
     ok: true,
     server_time: timeOf(deps),
     config: { aes_key_configured: Boolean(deps.authKey) },
     bilibili,
-  });
+  };
+
+  // 诊断模式：GET /api/health?probe=1&bvid=BV...&cid=...
+  if (params.get('probe')) {
+    const bvidParam = params.get('bvid') ?? 'BV1GJ411x7h7';
+    const cidParam = Number(params.get('cid') ?? 0);
+    const bvid = bvidParam.match(/BV[0-9A-Za-z]{10}/)?.[0] ?? 'BV1GJ411x7h7';
+    payload.probe = await probeBili(bvid, Number.isFinite(cidParam) && cidParam > 0 ? cidParam : undefined);
+  }
+
+  return jsonResponse(payload);
 }
 
 /** API 总入口（index.ts 只负责路由到 /api/*） */
@@ -251,7 +262,7 @@ export async function handleApi(request: Request, deps: AppDeps): Promise<Respon
       return await handleSubtitles(request, deps);
     }
     if (path === '/api/health' && request.method === 'GET') {
-      return await handleHealth(deps);
+      return await handleHealth(deps, request);
     }
     return jsonResponse({ ok: false, code: 'NOT_FOUND', message: '接口不存在', server_time: timeOf(deps) }, 404);
   } catch (error) {
