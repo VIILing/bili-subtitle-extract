@@ -1,9 +1,14 @@
-# pnpm >=12 的新设置名（本机 pnpm 12 使用）
+# pnpm 10（Cloudflare Workers Builds 环境）要求 workspace 清单必须有 packages 字段，
+# 即使是单包项目也要写一个匹配模式；"." 表示把仓库根目录作为唯一 workspace 包。
+packages:
+  - "."
+
+# pnpm 12（本机）使用的新设置名：允许 esbuild / workerd 的 postinstall 脚本
 allowBuilds:
   esbuild: true
   workerd: true
 
-# pnpm 10/11 的兼容写法（Cloudflare 构建环境可能使用旧版本）
+# pnpm 10/11（Cloudflare Workers Builds 当前使用 pnpm 10.11.1）的兼容写法
 onlyBuiltDependencies:
   - esbuild
   - workerd
