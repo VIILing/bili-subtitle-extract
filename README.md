@@ -298,6 +298,10 @@ pnpm wrangler d1 execute DB --local --command "SELECT cache_key FROM subtitle"
 - **Cloudflare 出口风控**：B 站会对 CF 注入的 `cf-*` 请求头返回 412，已通过 `BILI_TRANSPORT=auto`
   自动切换到原始 TCP+TLS 解决（见第 6 节）；`/api/health` 的 `bilibili.via` 可确认实际走的是哪条路。
   如果 socket 也被 B 站按 IP 拦截，需要再考虑非 CF 中转（会引入额外服务器）。
+- **`x/web-interface/view` 可能被风控**：CF 出口请求该接口可能返回 412 或 `-404` 诱饵响应；
+  代码会自动降级用 `x/player/pagelist` 获取 cid / 分 P / 时长，标题退化为第一个分 P 的 part 名
+  （可能比真实标题略短），不影响字幕提取。
+- **首次提取延迟**：受 CF 出口 412 + socket 回退影响，首次提取约 3~5 秒；之后同视频同轨道命中 D1 缓存约 1 秒。
 - **字幕 URL 是限时签名**：缓存里只存轨道元信息，不存 `auth_key`；下载 403 时会自动重新取一次 URL。
 - **单次只抓一条轨**：切换语言 = 换缓存键重新请求（命中的轨道不会重复下载）。
 - **只支持有外挂字幕轨的视频**：没有 CC / AI 字幕的视频返回 `empty`；弹幕不能当字幕用。

@@ -317,7 +317,7 @@ async function resolveMeta(bvid: string, page: number): Promise<ResolvedMeta> {
   const video: VideoInfo = {
     bvid: String(view?.bvid ?? bvid),
     aid: Number(view?.aid ?? 0),
-    title: String(view?.title ?? pages[0]?.part ?? bvid),
+    title: String(view?.title || pages[0]?.part || current?.part || bvid).trim() || bvid,
     owner_name: String(view?.owner?.name ?? ''),
     owner_mid: Number(view?.owner?.mid ?? 0),
     duration: Number(view?.duration ?? current?.duration ?? 0),
@@ -421,113 +421,6 @@ async function health(): Promise<BiliHealth> {
       via: forceSocket ? 'socket' : 'fetch',
     };
   }
-}
-
-interface ProbeAttempt {
-  status: number;
-  code: number | null;
-  snippet: string;
-}
-
-interface ProbeResult {
-  label: string;
-  url: string;
-  fetch: ProbeAttempt;
-  socket: ProbeAttempt;
-}
-
-const FINGER_SPI_URL = 'https://api.bilibili.com/x/frontend/finger/spi';
-const WEB_VIDEO_URL = 'https://www.bilibili.com/video/';
-
-function parseCode(text: string): number | null {
-  try {
-    const payload = JSON.parse(text) as { code?: number };
-    return typeof payload?.code === 'number' ? payload.code : null;
-  } catch {
-    return null;
-  }
-}
-
-async function probeOne(
-  label: string,
-  url: string,
-  extraHeaders: Record<string, string> = {},
-): Promise<ProbeResult> {
-  const headers = { ...COMMON_HEADERS, ...extraHeaders };
-  let fetchAttempt: ProbeAttempt;
-  try {
-    const response = await fetchWithTimeout(url, { headers, redirect: 'follow' }, 10000);
-    const text = await response.text();
-    fetchAttempt = { status: response.status, code: parseCode(text), snippet: text.slice(0, 200) };
-  } catch (error) {
-    fetchAttempt = { status: 0, code: null, snippet: String((error as Error)?.message ?? error) };
-  }
-
-  let socketAttempt: ProbeAttempt;
-  try {
-    const response = await socketHttpGet(url, headers, 10000);
-    socketAttempt = { status: response.status, code: parseCode(response.text), snippet: response.text.slice(0, 200) };
-  } catch (error) {
-    socketAttempt = { status: 0, code: null, snippet: String((error as Error)?.message ?? error) };
-  }
-
-  return { label, url: url.split('?')[0], fetch: fetchAttempt, socket: socketAttempt };
-}
-
-/**
- * 诊断用：分别用 fetch / 原始 TCP+TLS 请求多个 B 站接口，返回状态码与响应片段。
- * 暴露在 GET /api/health?probe=1&bvid=...&cid=...（仅用于排查 412，定位后会删除）。
- */
-export async function probeBili(bvid: string, cid?: number): Promise<ProbeResult[]> {
-  const viewUrl = `${VIEW_URL}?bvid=${encodeURIComponent(bvid)}`;
-  const results: ProbeResult[] = [
-    await probeOne('nav', NAV_URL),
-    await probeOne('view', viewUrl),
-    await probeOne('pagelist', `${PAGELIST_URL}?bvid=${encodeURIComponent(bvid)}`),
-    await probeOne('view-jsonp', `${viewUrl}&jsonp=jsonp`),
-    await probeOne('view-videoref', viewUrl, { Referer: `${WEB_VIDEO_URL}${encodeURIComponent(bvid)}` }),
-    await probeOne('view-origin', viewUrl, {
-      Origin: 'https://www.bilibili.com',
-      'Sec-Fetch-Site': 'same-site',
-      'Sec-Fetch-Mode': 'cors',
-      'Sec-Fetch-Dest': 'empty',
-    }),
-    await probeOne('archive-stat', `https://api.bilibili.com/x/web-interface/archive/stat?bvid=${encodeURIComponent(bvid)}`),
-    await probeOne('wbi-view', `https://api.bilibili.com/x/web-interface/wbi/view?bvid=${encodeURIComponent(bvid)}`),
-    await probeOne('player-v2', `https://api.bilibili.com/x/player/v2?cid=${cid ?? 137649199}&bvid=${encodeURIComponent(bvid)}`),
-    await probeOne('view-aid', `${VIEW_URL}?aid=80433022`),
-    await probeOne('webpage', `${WEB_VIDEO_URL}${encodeURIComponent(bvid)}/`),
-  ];
-  if (cid) results.push(await probeOne('dm-view', `${DM_VIEW_URL}?oid=${cid}&type=1`));
-
-  try {
-    const spiResponse = await socketHttpGet(FINGER_SPI_URL, COMMON_HEADERS, 8000);
-    const spiPayload = JSON.parse(spiResponse.text) as { code?: number; data?: { b_3?: string; b_4?: string } };
-    results.push({
-      label: 'finger-spi',
-      url: FINGER_SPI_URL,
-      fetch: { status: 0, code: null, snippet: '(skipped)' },
-      socket: { status: spiResponse.status, code: spiPayload?.code ?? null, snippet: spiResponse.text.slice(0, 200) },
-    });
-    const b3 = spiPayload?.data?.b_3;
-    const b4 = spiPayload?.data?.b_4;
-    if (b3 && b4) {
-      results.push(
-        await probeOne('view-with-cookie', `${VIEW_URL}?bvid=${encodeURIComponent(bvid)}`, {
-          Cookie: `buvid3=${b3}; buvid4=${b4}`,
-        }),
-      );
-    }
-  } catch (error) {
-    results.push({
-      label: 'finger-spi',
-      url: FINGER_SPI_URL,
-      fetch: { status: 0, code: null, snippet: String((error as Error)?.message ?? error) },
-      socket: { status: 0, code: null, snippet: '' },
-    });
-  }
-
-  return results;
 }
 
 /** 生产环境实现：使用全局 fetch（Worker / Node 18+ 均可） */
