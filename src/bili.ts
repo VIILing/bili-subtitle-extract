@@ -396,10 +396,15 @@ interface ProbeAttempt {
 }
 
 interface ProbeResult {
+  label: string;
   url: string;
   fetch: ProbeAttempt;
   socket: ProbeAttempt;
 }
+
+const FINGER_SPI_URL = 'https://api.bilibili.com/x/frontend/finger/spi';
+const PAGELIST_URL = 'https://api.bilibili.com/x/player/pagelist';
+const WEB_VIDEO_URL = 'https://www.bilibili.com/video/';
 
 function parseCode(text: string): number | null {
   try {
@@ -410,34 +415,73 @@ function parseCode(text: string): number | null {
   }
 }
 
-async function probeOne(url: string): Promise<ProbeResult> {
+async function probeOne(
+  label: string,
+  url: string,
+  extraHeaders: Record<string, string> = {},
+): Promise<ProbeResult> {
+  const headers = { ...COMMON_HEADERS, ...extraHeaders };
   let fetchAttempt: ProbeAttempt;
   try {
-    const response = await fetchWithTimeout(url, { headers: COMMON_HEADERS, redirect: 'follow' }, 10000);
+    const response = await fetchWithTimeout(url, { headers, redirect: 'follow' }, 10000);
     const text = await response.text();
-    fetchAttempt = { status: response.status, code: parseCode(text), snippet: text.slice(0, 220) };
+    fetchAttempt = { status: response.status, code: parseCode(text), snippet: text.slice(0, 200) };
   } catch (error) {
     fetchAttempt = { status: 0, code: null, snippet: String((error as Error)?.message ?? error) };
   }
 
   let socketAttempt: ProbeAttempt;
   try {
-    const response = await socketHttpGet(url, COMMON_HEADERS, 10000);
-    socketAttempt = { status: response.status, code: parseCode(response.text), snippet: response.text.slice(0, 220) };
+    const response = await socketHttpGet(url, headers, 10000);
+    socketAttempt = { status: response.status, code: parseCode(response.text), snippet: response.text.slice(0, 200) };
   } catch (error) {
     socketAttempt = { status: 0, code: null, snippet: String((error as Error)?.message ?? error) };
   }
 
-  return { url: url.split('?')[0], fetch: fetchAttempt, socket: socketAttempt };
+  return { label, url: url.split('?')[0], fetch: fetchAttempt, socket: socketAttempt };
 }
 
 /**
- * 诊断用：分别用 fetch / 原始 TCP+TLS 请求 nav、view、dm/view，返回状态码与响应片段。
- * 暴露在 GET /api/health?probe=1&bvid=...&cid=...（只用于排查 412）。
+ * 诊断用：分别用 fetch / 原始 TCP+TLS 请求多个 B 站接口，返回状态码与响应片段。
+ * 暴露在 GET /api/health?probe=1&bvid=...&cid=...（仅用于排查 412，定位后会删除）。
  */
 export async function probeBili(bvid: string, cid?: number): Promise<ProbeResult[]> {
-  const results = [await probeOne(NAV_URL), await probeOne(`${VIEW_URL}?bvid=${encodeURIComponent(bvid)}`)];
-  if (cid) results.push(await probeOne(`${DM_VIEW_URL}?oid=${cid}&type=1`));
+  const results: ProbeResult[] = [
+    await probeOne('nav', NAV_URL),
+    await probeOne('view', `${VIEW_URL}?bvid=${encodeURIComponent(bvid)}`),
+    await probeOne('pagelist', `${PAGELIST_URL}?bvid=${encodeURIComponent(bvid)}`),
+    await probeOne('view-aid', `${VIEW_URL}?aid=80433022`),
+    await probeOne('webpage', `${WEB_VIDEO_URL}${encodeURIComponent(bvid)}/`),
+  ];
+  if (cid) results.push(await probeOne('dm-view', `${DM_VIEW_URL}?oid=${cid}&type=1`));
+
+  try {
+    const spiResponse = await socketHttpGet(FINGER_SPI_URL, COMMON_HEADERS, 8000);
+    const spiPayload = JSON.parse(spiResponse.text) as { code?: number; data?: { b_3?: string; b_4?: string } };
+    results.push({
+      label: 'finger-spi',
+      url: FINGER_SPI_URL,
+      fetch: { status: 0, code: null, snippet: '(skipped)' },
+      socket: { status: spiResponse.status, code: spiPayload?.code ?? null, snippet: spiResponse.text.slice(0, 200) },
+    });
+    const b3 = spiPayload?.data?.b_3;
+    const b4 = spiPayload?.data?.b_4;
+    if (b3 && b4) {
+      results.push(
+        await probeOne('view-with-cookie', `${VIEW_URL}?bvid=${encodeURIComponent(bvid)}`, {
+          Cookie: `buvid3=${b3}; buvid4=${b4}`,
+        }),
+      );
+    }
+  } catch (error) {
+    results.push({
+      label: 'finger-spi',
+      url: FINGER_SPI_URL,
+      fetch: { status: 0, code: null, snippet: String((error as Error)?.message ?? error) },
+      socket: { status: 0, code: null, snippet: '' },
+    });
+  }
+
   return results;
 }
 
