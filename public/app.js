@@ -200,7 +200,7 @@
 
     clearRetry();
     hideStatus();
-    setLoading(true, lang ? `正在获取 ${lang} 字幕…` : '正在获取字幕…');
+    setLoading(true, lang && lang !== 'auto' ? `正在获取 ${lang} 字幕…` : '正在获取字幕…');
     state.lastRequest = { bvid, page, lang };
 
     try {

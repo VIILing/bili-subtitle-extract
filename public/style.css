@@ -22,6 +22,12 @@
   box-sizing: border-box;
 }
 
+/* 关键：作者样式里的 display 会覆盖浏览器对 [hidden] 的默认 display:none，
+   导致 .loading { display:inline-flex } 时“请求中…”和转圈图标在 hidden 状态下仍然显示。 */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
