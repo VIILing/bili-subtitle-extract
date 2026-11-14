@@ -41,6 +41,7 @@ export function configureBiliClient(transport?: string): void {
 
 const VIEW_URL = 'https://api.bilibili.com/x/web-interface/view';
 const DM_VIEW_URL = 'https://api.bilibili.com/x/v2/dm/view';
+const PAGELIST_URL = 'https://api.bilibili.com/x/player/pagelist';
 const NAV_URL = 'https://api.bilibili.com/x/web-interface/nav';
 
 /** 默认轨道优先级：人工中文字幕 > AI 中文字幕 > 英文 > 其它 */
@@ -223,23 +224,56 @@ export function pickTrack(tracks: TrackInfo[], requested: string): TrackInfo {
   );
 }
 
-/** 解析 BVID -> 视频信息 + 字幕轨列表（不写缓存，缓存由 store 层负责） */
-async function resolveMeta(bvid: string, page: number): Promise<ResolvedMeta> {
-  const view = await biliGet<{
-    bvid?: string;
-    aid?: number;
-    title?: string;
-    pic?: string;
-    duration?: number;
-    pubdate?: number;
-    cid?: number;
-    owner?: { mid?: number; name?: string };
-    pages?: Array<{ cid?: number; page?: number; part?: string; duration?: number }>;
-  }>(VIEW_URL, { bvid });
+interface ViewData {
+  bvid?: string;
+  aid?: number;
+  title?: string;
+  pic?: string;
+  duration?: number;
+  pubdate?: number;
+  cid?: number;
+  owner?: { mid?: number; name?: string };
+  pages?: Array<{ cid?: number; page?: number; part?: string; duration?: number }>;
+}
 
-  const allPages = Array.isArray(view?.pages) ? view.pages : [];
+/**
+ * 解析 BVID -> 视频信息 + 字幕轨列表（不写缓存，缓存由 store 层负责）。
+ *
+ * 注意：Cloudflare 出口访问 `x/web-interface/view` 会被 B 站风控（HTTP 412，
+ * 原始 TCP 下也可能返回 -404 的诱饵响应），但 `x/player/pagelist` 和
+ * `x/v2/dm/view` 可用 —— 所以 view 失败时降级用 pagelist 取 cid / 分P / 时长，
+ * 标题退化为第一个分P的 part 名。这样即使拿不到标题也不影响字幕提取。
+ */
+async function resolveMeta(bvid: string, page: number): Promise<ResolvedMeta> {
+  let view: ViewData | null = null;
+  let viewError: ApiError | null = null;
+  try {
+    view = await biliGet<ViewData>(VIEW_URL, { bvid });
+  } catch (error) {
+    viewError =
+      error instanceof ApiError
+        ? error
+        : new ApiError(502, 'BILI_ERROR', (error as Error)?.message ?? '获取视频信息失败');
+  }
+
+  let allPages = Array.isArray(view?.pages) ? view!.pages! : [];
+
   if (!allPages.length) {
-    throw new ApiError(404, 'VIDEO_NOT_FOUND', '视频不存在或没有可用的分 P');
+    // 降级：用 pagelist 拿分P（CF 出口实测该接口可正常返回）
+    try {
+      const list = await biliGet<Array<{ cid?: number; page?: number; part?: string; duration?: number }>>(
+        PAGELIST_URL,
+        { bvid },
+      );
+      if (Array.isArray(list) && list.length) allPages = list;
+    } catch (error) {
+      if (error instanceof ApiError && error.code === 'VIDEO_NOT_FOUND') throw error;
+      throw viewError ?? (error instanceof ApiError ? error : new ApiError(502, 'BILI_ERROR', '获取视频信息失败'));
+    }
+  }
+
+  if (!allPages.length) {
+    throw viewError ?? new ApiError(404, 'VIDEO_NOT_FOUND', '视频不存在或没有可用的分 P');
   }
   if (!Number.isInteger(page) || page < 1 || page > allPages.length) {
     throw new ApiError(400, 'INVALID_PAGE', `分 P 超出范围（该视频共 ${allPages.length} P）`);
@@ -283,10 +317,10 @@ async function resolveMeta(bvid: string, page: number): Promise<ResolvedMeta> {
   const video: VideoInfo = {
     bvid: String(view?.bvid ?? bvid),
     aid: Number(view?.aid ?? 0),
-    title: String(view?.title ?? ''),
+    title: String(view?.title ?? pages[0]?.part ?? bvid),
     owner_name: String(view?.owner?.name ?? ''),
     owner_mid: Number(view?.owner?.mid ?? 0),
-    duration: Number(view?.duration ?? 0),
+    duration: Number(view?.duration ?? current?.duration ?? 0),
     cover: String(view?.pic ?? ''),
     pubdate: Number(view?.pubdate ?? 0),
     page,
@@ -403,7 +437,6 @@ interface ProbeResult {
 }
 
 const FINGER_SPI_URL = 'https://api.bilibili.com/x/frontend/finger/spi';
-const PAGELIST_URL = 'https://api.bilibili.com/x/player/pagelist';
 const WEB_VIDEO_URL = 'https://www.bilibili.com/video/';
 
 function parseCode(text: string): number | null {
@@ -446,10 +479,22 @@ async function probeOne(
  * 暴露在 GET /api/health?probe=1&bvid=...&cid=...（仅用于排查 412，定位后会删除）。
  */
 export async function probeBili(bvid: string, cid?: number): Promise<ProbeResult[]> {
+  const viewUrl = `${VIEW_URL}?bvid=${encodeURIComponent(bvid)}`;
   const results: ProbeResult[] = [
     await probeOne('nav', NAV_URL),
-    await probeOne('view', `${VIEW_URL}?bvid=${encodeURIComponent(bvid)}`),
+    await probeOne('view', viewUrl),
     await probeOne('pagelist', `${PAGELIST_URL}?bvid=${encodeURIComponent(bvid)}`),
+    await probeOne('view-jsonp', `${viewUrl}&jsonp=jsonp`),
+    await probeOne('view-videoref', viewUrl, { Referer: `${WEB_VIDEO_URL}${encodeURIComponent(bvid)}` }),
+    await probeOne('view-origin', viewUrl, {
+      Origin: 'https://www.bilibili.com',
+      'Sec-Fetch-Site': 'same-site',
+      'Sec-Fetch-Mode': 'cors',
+      'Sec-Fetch-Dest': 'empty',
+    }),
+    await probeOne('archive-stat', `https://api.bilibili.com/x/web-interface/archive/stat?bvid=${encodeURIComponent(bvid)}`),
+    await probeOne('wbi-view', `https://api.bilibili.com/x/web-interface/wbi/view?bvid=${encodeURIComponent(bvid)}`),
+    await probeOne('player-v2', `https://api.bilibili.com/x/player/v2?cid=${cid ?? 137649199}&bvid=${encodeURIComponent(bvid)}`),
     await probeOne('view-aid', `${VIEW_URL}?aid=80433022`),
     await probeOne('webpage', `${WEB_VIDEO_URL}${encodeURIComponent(bvid)}/`),
   ];
