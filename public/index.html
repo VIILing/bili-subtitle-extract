@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>B 站字幕提取</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header class="header">
+        <h1>B 站字幕提取</h1>
+        <p class="sub">
+          输入 AES 密钥与 BVID，从 B 站匿名提取外挂字幕轨（CC / AI 字幕），并缓存到 Cloudflare D1。
+          同一视频 + 同一字幕轨 1 天内直接命中缓存。
+        </p>
+      </header>
+
+      <section class="card form">
+        <div class="field">
+          <label for="key">AES 密钥</label>
+          <div class="key-wrap">
+            <input id="key" type="password" autocomplete="off" spellcheck="false" placeholder="部署时在 Cloudflare 设置的 AES_KEY" />
+            <button id="toggle-key" class="ghost" type="button" aria-label="显示或隐藏密钥">显示</button>
+          </div>
+          <p class="hint">密钥只保存在本机浏览器（localStorage），不会上传；每次请求会用它加密「BVID + 时间戳」作为 token。</p>
+        </div>
+
+        <div class="grid">
+          <div class="field">
+            <label for="bvid">BVID / 视频链接</label>
+            <input id="bvid" type="text" spellcheck="false" placeholder="BV1GJ411x7h7 或 https://www.bilibili.com/video/BV..." />
+          </div>
+          <div class="field page-field">
+            <label for="page">分 P</label>
+            <input id="page" type="number" min="1" max="100" step="1" value="1" />
+          </div>
+        </div>
+
+        <div class="actions">
+          <button id="fetch" class="primary" type="button">提取字幕</button>
+          <label class="checkbox">
+            <input id="remember" type="checkbox" checked />
+            记住密钥
+          </label>
+          <span id="loading" class="loading" hidden>
+            <span class="spinner" aria-hidden="true"></span>
+            <span id="loading-text">请求中…</span>
+          </span>
+        </div>
+
+        <div id="status" class="status" role="status" hidden></div>
+      </section>
+
+      <section id="result" class="card result" hidden>
+        <div class="video-head">
+          <div class="video-text">
+            <h2 id="video-title"></h2>
+            <p id="video-meta" class="muted"></p>
+          </div>
+          <span id="cache-badge" class="badge"></span>
+        </div>
+
+        <div class="tracks-bar">
+          <span class="label">字幕轨</span>
+          <div id="tracks" class="tracks"></div>
+        </div>
+
+        <div class="cues-bar">
+          <span id="cue-count" class="label"></span>
+          <div class="export">
+            <button id="copy-text" class="ghost small" type="button">复制纯文本</button>
+            <button id="copy-srt" class="ghost small" type="button">复制 SRT</button>
+            <button id="download-srt" class="ghost small" type="button">下载 .srt</button>
+            <button id="download-txt" class="ghost small" type="button">下载 .txt</button>
+          </div>
+        </div>
+
+        <ol id="cues" class="cues"></ol>
+      </section>
+
+      <footer class="footer">
+        <p>仅请求 B 站公开接口，请控制使用频率。字幕版权归原作者与平台所有，请勿二次发布或商用。</p>
+        <p class="muted">缓存与锁存放于 Cloudflare D1；抓取失败时锁会在 120 秒后自动释放。</p>
+      </footer>
+    </main>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>
