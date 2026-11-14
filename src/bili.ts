@@ -12,6 +12,7 @@
  */
 
 import { ApiError, biliCodeError } from './errors';
+import { socketHttpGet } from './socket-http';
 import type { BiliHealth, Cue, TrackInfo, VideoInfo, VideoMeta } from './types';
 
 const USER_AGENT =
@@ -23,6 +24,20 @@ const COMMON_HEADERS: Record<string, string> = {
   'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
   Referer: 'https://www.bilibili.com/',
 };
+
+/** 出站传输方式：auto = 先 fetch，遇 412/网络错误改用原始 TCP+TLS；fetch = 只用 fetch；socket = 只用 TCP+TLS */
+export type BiliTransport = 'auto' | 'fetch' | 'socket';
+
+let transportMode: BiliTransport = 'auto';
+let forceSocket = false;
+
+/** 每次 Worker 请求前调用，读取环境变量 BILI_TRANSPORT（auto / fetch / socket） */
+export function configureBiliClient(transport?: string): void {
+  const mode = String(transport ?? '').trim().toLowerCase();
+  if (mode === 'auto' || mode === 'fetch' || mode === 'socket') transportMode = mode;
+  if (transportMode === 'socket') forceSocket = true;
+  if (transportMode === 'fetch') forceSocket = false;
+}
 
 const VIEW_URL = 'https://api.bilibili.com/x/web-interface/view';
 const DM_VIEW_URL = 'https://api.bilibili.com/x/v2/dm/view';
@@ -96,32 +111,68 @@ async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: numbe
   }
 }
 
+/** 构建带 query 的完整 URL */
+function buildTarget(url: string, params?: Record<string, string | number>): string {
+  const target = new URL(url);
+  if (params) {
+    for (const [key, value] of Object.entries(params)) target.searchParams.set(key, String(value));
+  }
+  return target.toString();
+}
+
+/**
+ * 统一出站 GET：
+ * - auto（默认）：先用 fetch；若 HTTP 412 或网络错误，则改用原始 TCP/TLS（socket）重试；
+ *   成功一次后本 isolate 内后续请求都直接走 socket，避免每次都先撞一次 412。
+ * - fetch：只用 fetch；- socket：只用 socket。
+ */
+async function rawGet(target: string, timeoutMs: number): Promise<{ status: number; text: string }> {
+  if (transportMode !== 'socket' && !forceSocket) {
+    try {
+      const response = await fetchWithTimeout(target, { headers: COMMON_HEADERS, redirect: 'follow' }, timeoutMs);
+      if (response.status !== 412 || transportMode === 'fetch') {
+        return { status: response.status, text: await response.text() };
+      }
+    } catch (error) {
+      if (transportMode === 'fetch') throw error;
+      // 网络层失败也尝试 socket
+    }
+  }
+
+  try {
+    const response = await socketHttpGet(target, COMMON_HEADERS, timeoutMs);
+    forceSocket = true;
+    return { status: response.status, text: response.text };
+  } catch (error) {
+    throw new ApiError(
+      502,
+      'BILI_SOCKET_ERROR',
+      `通过 TCP/TLS 访问 B 站失败：${(error as Error)?.message ?? '未知错误'}`,
+    );
+  }
+}
+
 /** GET 一个 B 站 JSON 接口，返回 data；code 非白名单时抛 ApiError */
 async function biliGet<T>(
   url: string,
   params: Record<string, string | number> | undefined,
   allowCodes: number[] = [0],
 ): Promise<T> {
-  const target = new URL(url);
-  if (params) {
-    for (const [key, value] of Object.entries(params)) target.searchParams.set(key, String(value));
-  }
-
-  const response = await fetchWithTimeout(target.toString(), { headers: COMMON_HEADERS, redirect: 'follow' }, 15000);
+  const response = await rawGet(buildTarget(url, params), 15000);
   if (response.status === 412) {
     throw new ApiError(
       502,
       'BILI_RISK_CONTROL',
-      'B 站风控拦截（HTTP 412）。Cloudflare 出口 IP 可能被 B 站限制，可在 /api/health 查看详情。',
+      'B 站风控拦截（HTTP 412）。Cloudflare 出口可能仍被 B 站限制，可在 /api/health 查看详情。',
     );
   }
-  if (!response.ok) {
+  if (response.status < 200 || response.status >= 300) {
     throw new ApiError(502, 'BILI_HTTP', `B 站接口返回 HTTP ${response.status}`);
   }
 
   let payload: BiliResponse<T>;
   try {
-    payload = (await response.json()) as BiliResponse<T>;
+    payload = JSON.parse(response.text) as BiliResponse<T>;
   } catch {
     throw new ApiError(502, 'BILI_PARSE', 'B 站接口返回的不是 JSON（可能被风控或接口已变更）');
   }
@@ -277,17 +328,17 @@ async function fetchTrackUrl(cid: number, lan: string): Promise<string> {
 
 /** 下载并解析一条字幕 JSON，返回紧凑 cues */
 async function downloadCues(url: string): Promise<Cue[]> {
-  const response = await fetchWithTimeout(url, { headers: COMMON_HEADERS, redirect: 'follow' }, 20000);
+  const response = await rawGet(url, 20000);
   if (response.status === 403) {
     throw new ApiError(403, 'SUBTITLE_EXPIRED', '字幕链接已过期（auth_key 失效），需要重新获取');
   }
-  if (!response.ok) {
+  if (response.status < 200 || response.status >= 300) {
     throw new ApiError(502, 'SUBTITLE_HTTP', `字幕文件下载失败：HTTP ${response.status}`);
   }
 
   let payload: { body?: Array<Record<string, unknown>> };
   try {
-    payload = (await response.json()) as { body?: Array<Record<string, unknown>> };
+    payload = JSON.parse(response.text) as { body?: Array<Record<string, unknown>> };
   } catch {
     throw new ApiError(502, 'SUBTITLE_PARSE', '字幕文件不是合法 JSON（auth_key 可能失效）');
   }
@@ -308,11 +359,11 @@ async function downloadCues(url: string): Promise<Cue[]> {
 async function health(): Promise<BiliHealth> {
   const started = Date.now();
   try {
-    const response = await fetchWithTimeout(NAV_URL, { headers: COMMON_HEADERS, redirect: 'follow' }, 10000);
+    const response = await rawGet(NAV_URL, 10000);
     let code: number | null = null;
     let message = '';
     try {
-      const payload = (await response.json()) as { code?: number; message?: string };
+      const payload = JSON.parse(response.text) as { code?: number; message?: string };
       code = Number(payload?.code);
       message = String(payload?.message ?? '');
     } catch {
@@ -324,6 +375,7 @@ async function health(): Promise<BiliHealth> {
       code,
       message,
       ms: Date.now() - started,
+      via: forceSocket ? 'socket' : 'fetch',
     };
   } catch (error) {
     return {
@@ -332,6 +384,7 @@ async function health(): Promise<BiliHealth> {
       code: null,
       message: (error as Error)?.message ?? '网络错误',
       ms: Date.now() - started,
+      via: forceSocket ? 'socket' : 'fetch',
     };
   }
 }

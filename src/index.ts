@@ -7,7 +7,7 @@
  */
 
 import { handleApi } from './app';
-import { createBiliClient } from './bili';
+import { configureBiliClient, createBiliClient } from './bili';
 import { createD1Store } from './store';
 import type { Env } from './types';
 
@@ -16,6 +16,7 @@ export default {
     const path = new URL(request.url).pathname;
 
     if (path.startsWith('/api/')) {
+      configureBiliClient(env.BILI_TRANSPORT);
       return handleApi(request, {
         authKey: env.AES_KEY,
         store: createD1Store(env.DB),

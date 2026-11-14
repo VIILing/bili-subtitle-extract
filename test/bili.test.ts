@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { PREFERRED_LANGS, createBiliClient, normalizeSubtitleUrl, pickTrack } from '../src/bili';
+import {
+  PREFERRED_LANGS,
+  configureBiliClient,
+  createBiliClient,
+  normalizeSubtitleUrl,
+  pickTrack,
+} from '../src/bili';
 import { ApiError } from '../src/errors';
 import { makeMeta } from './helpers';
 
@@ -164,12 +170,14 @@ describe('resolveMeta', () => {
     });
   });
 
-  it('HTTP 412 映射为 BILI_RISK_CONTROL', async () => {
+  it('fetch 模式 HTTP 412 映射为 BILI_RISK_CONTROL', async () => {
+    configureBiliClient('fetch'); // 单元测试环境没有 cloudflare:sockets，显式只用 fetch
     vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response('blocked', { status: 412 })));
     await expect(createBiliClient().resolveMeta(BVID, 1)).rejects.toMatchObject({
       code: 'BILI_RISK_CONTROL',
       status: 502,
     });
+    configureBiliClient('auto');
   });
 
   it('B 站 code=-404 映射为 VIDEO_NOT_FOUND', async () => {

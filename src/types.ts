@@ -57,6 +57,8 @@ export interface BiliHealth {
   code: number | null;
   message: string;
   ms: number;
+  /** 实际使用的出站方式：fetch 或原始 TCP/TLS */
+  via?: 'fetch' | 'socket';
 }
 
 /** Cloudflare Worker 绑定 */
@@ -67,4 +69,6 @@ export interface Env {
   ASSETS: Fetcher;
   /** 共享口令：网页端输入，Worker 侧用同一个值派生 AES 密钥（Cloudflare Secret，不要入库） */
   AES_KEY?: string;
+  /** 出站方式：auto（默认）/ fetch / socket */
+  BILI_TRANSPORT?: string;
 }

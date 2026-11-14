@@ -132,7 +132,7 @@ KV 免费额度只有 1000 写/天，一次提取要写 2~3 次，所以不采�
   "ok": true,
   "server_time": "...",
   "config": { "aes_key_configured": true },
-  "bilibili": { "ok": true, "http_status": 200, "code": -101, "message": "账号未登录", "ms": 132 }
+  "bilibili": { "ok": true, "http_status": 200, "code": -101, "message": "账号未登录", "ms": 132, "via": "socket" }
 }
 ```
 
@@ -218,7 +218,25 @@ Workers Builds 里推荐配置：
 
 ---
 
-## 6. 本地开发
+## 6. Cloudflare 出口 412 与 socket 传输
+
+Cloudflare Worker 用 `fetch()` 出站时会被强制附加 `cf-connecting-ip`、`cf-ipcountry`、`cf-worker`
+等请求头，B 站 WAF 会因此返回 **HTTP 412**（本项目线上首次部署实测就是如此）。
+
+因此 `src/bili.ts` 内置了两种出站方式，由 Worker 变量 `BILI_TRANSPORT` 控制：
+
+| 值 | 行为 |
+|---|---|
+| `auto`（默认） | 先 `fetch`；若 HTTP 412 或网络错误，自动改用原始 TCP + TLS（`cloudflare:sockets` + 自拼 HTTP/1.1）重试；成功后本 isolate 内后续请求都直接走 socket，避免反复撞 412 |
+| `fetch` | 只用 `fetch`（本地开发一般够用） |
+| `socket` | 只用原始 TCP + TLS（强制走 socket，可用于排查） |
+
+原始 TCP 方式完全不经过 CF 的 HTTP 代理层，请求头由我们自己构造（Host / UA / Referer / Accept），
+所以不会带 `cf-*` 头。`/api/health` 返回的 `bilibili.via` 会显示本次实际使用的方式（`fetch` / `socket`）。
+
+本地强制测试 socket 方式：在 `.dev.vars` 里写 `BILI_TRANSPORT=socket` 再 `pnpm dev`。
+
+## 7. 本地开发
 
 ```bash
 pnpm install
@@ -251,7 +269,7 @@ pnpm wrangler d1 execute DB --local --command "SELECT cache_key FROM subtitle"
 
 ---
 
-## 7. 目录结构
+## 8. 目录结构
 
 ```
 .
@@ -275,10 +293,11 @@ pnpm wrangler d1 execute DB --local --command "SELECT cache_key FROM subtitle"
 
 ---
 
-## 8. 已知限制与风险
+## 9. 已知限制与风险
 
-- **Cloudflare 出口风控**：B 站会对机房 IP / 特定请求头返回 412。部署后先看 `/api/health`；
-  如果 412，可考虑用 `cloudflare:sockets` + `startTls()` 自建原始 HTTP/1.1 请求绕过 CF 注入头（当前版本未实现，需要时再加）。
+- **Cloudflare 出口风控**：B 站会对 CF 注入的 `cf-*` 请求头返回 412，已通过 `BILI_TRANSPORT=auto`
+  自动切换到原始 TCP+TLS 解决（见第 6 节）；`/api/health` 的 `bilibili.via` 可确认实际走的是哪条路。
+  如果 socket 也被 B 站按 IP 拦截，需要再考虑非 CF 中转（会引入额外服务器）。
 - **字幕 URL 是限时签名**：缓存里只存轨道元信息，不存 `auth_key`；下载 403 时会自动重新取一次 URL。
 - **单次只抓一条轨**：切换语言 = 换缓存键重新请求（命中的轨道不会重复下载）。
 - **只支持有外挂字幕轨的视频**：没有 CC / AI 字幕的视频返回 `empty`；弹幕不能当字幕用。
@@ -287,7 +306,7 @@ pnpm wrangler d1 execute DB --local --command "SELECT cache_key FROM subtitle"
   个人使用足够；浏览器页面不存字幕数据，只缓存密钥。
 - **鉴权简化**：token 60 秒内可重放；密钥一旦泄露，对方可以调用接口但无法读取你浏览器的 localStorage。
 
-## 9. 合规
+## 10. 合规
 
 - 只请求 B 站公开接口，用于个人学习与研究；请控制频率，不要滥用；
 - 字幕版权归原作者与平台所有，请勿二次发布或商用；
