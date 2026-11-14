@@ -58,6 +58,16 @@ body {
   font-size: 13.5px;
 }
 
+.header .sub a {
+  color: var(--primary);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.header .sub a:hover {
+  text-decoration: underline;
+}
+
 .card {
   background: var(--card);
   border: 1px solid var(--line);

@@ -126,6 +126,8 @@ KV 免费额度只有 1000 写/天，一次提取要写 2~3 次，所以不采�
 | 500 | `SERVER_NOT_CONFIGURED` | 没配置 `AES_KEY` Secret |
 | 502/504 | `BILI_RISK_CONTROL` / `BILI_HTTP` / `BILI_TIMEOUT` / `SUBTITLE_EXPIRED` 等 | B 站侧错误（含 412 风控） |
 
+> 面向 AI Agent / 自动化脚本的一页式使用说明见 [public/skill.txt](public/skill.txt)（部署后访问 `/skill.txt`）；网页顶部也提供了入口链接。
+
 ### 2.2 `GET /api/health`
 
 不需要鉴权，用于排查「Cloudflare 出口能否访问 B 站」：
@@ -290,7 +292,8 @@ pnpm wrangler d1 execute DB --local --command "SELECT cache_key FROM subtitle"
 ├── public/           # 网页（同源静态资源，无框架无构建）
 │   ├── index.html
 │   ├── app.js        # 浏览器端 WebCrypto 生成 token + 展示/导出字幕
-│   └── style.css
+│   ├── style.css
+│   └── skill.txt     # 面向 Agent 的 API/Skill 使用说明（部署后 /skill.txt）
 ├── test/             # vitest：鉴权、B 站解析、API 流程（假 Store/BiliClient）
 ├── docs/
 │   └── anti-risk-control.md   # B 站风控对抗记录（412 / socket / pagelist，含实测数据）

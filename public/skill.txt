@@ -1,0 +1,270 @@
+# Skill: bili-subtitle-extract API（B 站字幕提取）
+
+> 面向 AI Agent / 自动化脚本的一页式使用说明。
+> 本文件由 Worker 以 text/plain 直接提供，可直接保存为 skill 文档（例如 SKILL.md）。
+
+## 0. Skill 元信息
+
+- **name**: `bili-subtitle-extract`
+- **用途**: 根据 BVID 提取 B 站视频的外挂字幕（UP 主 CC 字幕 / B 站 AI 字幕），返回带时间轴的 JSON cues；支持分 P 与语言选择。
+- **Base URL**: 当前部署域名，即本文件的访问地址 origin。下文用 `{BASE_URL}` 表示，请勿在代码里硬编码临时域名。
+- **鉴权**: 共享口令 `AES_KEY`（部署者在 Cloudflare Dashboard 设置的 Secret）。每次请求用 AES-256-GCM 加密 `{"b":"<BVID>","t":<unix秒>}` 生成 token。
+- **缓存**: 同一 `BVID + 分P + 字幕轨` 在 D1 缓存 1 天；同一轨道并发抓取会返回 429，按提示等待后重试。
+
+---
+
+## 1. 能力与限制
+
+可以获得：
+
+- 视频信息：标题、UP 主、时长、分 P 列表（拿不到真实标题时会退化为第一个分 P 的 part 名）；
+- 字幕轨列表：如 `zh-CN`、`zh-Hans`、`en-US`、`ja`、`ko` 等，含是否 AI 字幕；
+- 单条字幕轨的 cues：`[[起始秒, 结束秒, 文本], ...]`，可自行转 SRT / TXT。
+
+限制：
+
+- **一次请求只返回一条字幕轨**。需要其他语言 → 换 `lang` 再请求一次（有独立缓存）。
+- 仅支持有外挂字幕轨的视频；纯硬字幕/无字幕视频返回 `empty: true`。
+- 不绕过登录、付费、充电、地区限制；请控制请求频率。
+- 字幕版权归原作者与平台所有，请勿二次发布或商用。
+
+---
+
+## 2. 鉴权算法（AES-256-GCM + 60 秒时间窗）
+
+```
+key        = SHA-256( UTF-8( AES_KEY ) )              // 32 字节，AES-256-GCM
+iv         = 12 字节随机数
+plaintext  = UTF-8( JSON.stringify({ b: "<BVID>", t: <unix 秒> }) )
+ciphertext = AES-GCM(key, iv, plaintext)              // 自带 16 字节 tag
+token      = base64url( iv || ciphertext )            // 去掉 padding，用 -_ 替换 +/
+```
+
+Worker 侧校验：能解密（口令正确）→ `b` 与请求 BVID 一致 → `|now - t| <= 60`。
+**每次请求都要重新生成 token**，不要复用；token 只对当前 BVID 有效。
+
+### 2.1 Node.js / 浏览器（WebCrypto）
+
+```js
+const enc = new TextEncoder();
+
+async function makeToken(passphrase, bvid, now = Math.floor(Date.now() / 1000)) {
+  const digest = await crypto.subtle.digest('SHA-256', enc.encode(passphrase));
+  const key = await crypto.subtle.importKey('raw', digest, { name: 'AES-GCM' }, false, ['encrypt']);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const plaintext = enc.encode(JSON.stringify({ b: bvid, t: now }));
+  const cipher = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plaintext));
+
+  const combined = new Uint8Array(iv.length + cipher.length);
+  combined.set(iv, 0);
+  combined.set(cipher, iv.length);
+
+  let binary = '';
+  for (const byte of combined) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+```
+
+### 2.2 Python（需要 `cryptography`）
+
+```python
+import base64, hashlib, json, os, time
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+def make_token(passphrase: str, bvid: str) -> str:
+    key = hashlib.sha256(passphrase.encode("utf-8")).digest()
+    iv = os.urandom(12)
+    plaintext = json.dumps({"b": bvid, "t": int(time.time())}, separators=(",", ":")).encode()
+    ciphertext = AESGCM(key).encrypt(iv, plaintext, None)
+    return base64.urlsafe_b64encode(iv + ciphertext).rstrip(b"=").decode()
+```
+
+---
+
+## 3. API
+
+### 3.1 `POST {BASE_URL}/api/subtitles`
+
+请求体（JSON）：
+
+```json
+{
+  "token": "<第 2 节的 token>",
+  "bvid": "BV1GJ411x7h7",
+  "page": 1,
+  "lang": "auto"
+}
+```
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `token` | 是 | 也可以放在 `Authorization: Bearer <token>` 头里 |
+| `bvid` | 是 | BVID；也接受包含 BVID 的视频链接 |
+| `page` | 否 | 分 P，默认 1，范围 1~100 |
+| `lang` | 否 | `auto`（默认，人工中文 > AI 中文 > 英文优先）/ 真实轨道名如 `zh-Hans`、`en-US` / 别名 `zh`、`en`、`ja`、`ko` |
+
+成功响应（HTTP 200）：
+
+```json
+{
+  "ok": true,
+  "cached": false,
+  "server_time": "2026-11-14T07:18:09.546Z",
+  "cache_key": "BV1GJ411x7h7-p1-zh-Hans",
+  "data": {
+    "video": {
+      "bvid": "BV1GJ411x7h7",
+      "aid": 0,
+      "title": "Never Gonna Give You Up - Rick Astley",
+      "owner_name": "",
+      "duration": 213,
+      "page": 1,
+      "page_count": 1,
+      "cid": 137649199,
+      "pages": [{ "page": 1, "part": "...", "duration": 213 }]
+    },
+    "tracks": [
+      { "lan": "zh-CN", "lan_doc": "中文（中国）", "is_ai": false },
+      { "lan": "zh-Hans", "lan_doc": "中文（简体）", "is_ai": false },
+      { "lan": "en-US", "lan_doc": "English", "is_ai": false }
+    ],
+    "track": { "lan": "zh-Hans", "lan_doc": "中文（简体）", "is_ai": false },
+    "cues": [[18.225, 21.65, "我们对爱情并不陌生"]],
+    "cue_count": 44
+  }
+}
+```
+
+- `cues` 为紧凑数组：`[起始秒, 结束秒, 文本]`；
+- `cached: true` 时命中 D1，不会有额外的 B 站请求；
+- 没有外挂字幕轨时返回 **HTTP 200** 且 `empty: true`、`tracks: []`，不算错误；
+- 视频元信息可能降级：B 站 `x/web-interface/view` 被风控时，`title` 会退化为第一个分 P 的 part 名，
+  `owner_name` 可能为空、`aid` 可能为 0；**字幕 cues 不受影响**。
+
+### 3.2 `GET {BASE_URL}/api/health`
+
+不需要鉴权，用于判断 Worker 到 B 站是否连通：
+
+```json
+{
+  "ok": true,
+  "server_time": "...",
+  "config": { "aes_key_configured": true },
+  "bilibili": { "ok": true, "http_status": 200, "code": -101, "message": "账号未登录", "ms": 673, "via": "socket" }
+}
+```
+
+`bilibili.code` 为 `-101` 属正常（匿名请求）。若 `http_status` 是 412 或 `ok:false`，说明 B 站风控/网络异常，应降低调用频率。
+
+---
+
+## 4. 错误与重试策略
+
+错误响应统一为：
+
+```json
+{ "ok": false, "code": "AUTH_FAILED", "message": "验签失败：AES 密钥不正确", "server_time": "..." }
+```
+
+| HTTP | code | 含义 | Agent 应如何处理 |
+|---|---|---|---|
+| 400 | `INVALID_BVID` / `INVALID_PAGE` / `INVALID_REQUEST` / `TRACK_NOT_FOUND` | 参数错误 | 修正参数后重试；`TRACK_NOT_FOUND` 时从 `details.available` 里选语言 |
+| 401 | `AUTH_FAILED` | 密钥错误 / token 过期 / BVID 不匹配 | **不要重试**；检查 AES_KEY 与本机时钟（±60 秒）后重新生成 token |
+| 404 | `VIDEO_NOT_FOUND` / `NO_SUBTITLE_TRACK` | 视频不存在 / 没有字幕轨 | 不要重试，告知用户 |
+| 429 | `CACHING` | 同一视频同一轨道正在被其他请求抓取 | 按 `retry_after_seconds` 等待后重试（通常 ≤120 秒） |
+| 500 | `SERVER_NOT_CONFIGURED` | 服务端没配置 AES_KEY | 不要重试，联系部署者 |
+| 502 | `BILI_RISK_CONTROL` / `BILI_HTTP` / `SUBTITLE_HTTP` / `SUBTITLE_PARSE` / `BILI_SOCKET_ERROR` | B 站侧错误（含 412 风控） | 指数退避重试最多 1~2 次；持续 412 时停手并降频 |
+| 504 | `BILI_TIMEOUT` | B 站请求超时 | 指数退避重试最多 1~2 次 |
+
+推荐 Agent 重试策略：
+
+1. `429`：等待 `retry_after_seconds` 秒后重试；最多 2 次；
+2. `502/504`：等待 2s、4s 后重试；最多 2 次；
+3. `401`：不重试，输出排查提示；
+4. 其他 4xx：不重试。
+
+---
+
+## 5. 缓存与单飞（重要）
+
+- 缓存键为 `BVID-p{分P}-{真实轨道名}`，例如 `BV1GJ411x7h7-p1-zh-Hans`；
+- 缓存 TTL 1 天；同一轨道正在抓取时，后来者会拿到 `429 CACHING`；
+- 因此**重复调用是安全的**：先拿到 429 就等一会儿再试，而不是并发轰炸；
+- `lang=auto` 会解析成具体轨道后再查缓存，换语言请显式传对应 `lan`（可从响应 `data.tracks[].lan` 获取）。
+
+---
+
+## 6. 把 cues 转成 SRT / TXT
+
+```js
+function srtTime(seconds) {
+  const ms = Math.max(0, Math.round(seconds * 1000));
+  const h = Math.floor(ms / 3600000);
+  const m = Math.floor((ms % 3600000) / 60000);
+  const s = Math.floor((ms % 60000) / 1000);
+  const milli = ms % 1000;
+  const p = (n, w = 2) => String(n).padStart(w, '0');
+  return `${p(h)}:${p(m)}:${p(s)},${p(milli, 3)}`;
+}
+
+function cuesToSrt(cues) {
+  return cues
+    .map(([from, to, text], i) => `${i + 1}\n${srtTime(from)} --> ${srtTime(to)}\n${text}\n`)
+    .join('\n');
+}
+
+function cuesToText(cues) {
+  return cues
+    .map(([from, , text]) => {
+      const s = Math.max(0, Math.floor(from));
+      return `[${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}] ${text}`;
+    })
+    .join('\n');
+}
+```
+
+---
+
+## 7. 完整调用示例（curl）
+
+```bash
+# 1) 按第 2.1 / 2.2 节的算法生成 token，赋值给 TOKEN
+#    （仓库里的 scripts/mint-token.mjs 也可以在本地用：
+#     node scripts/mint-token.mjs <AES_KEY> BV1GJ411x7h7）
+TOKEN="<按第 2 节算法生成的 token>"
+
+# 2) 调用 API
+curl -s "{BASE_URL}/api/subtitles" \
+  -H 'content-type: application/json' \
+  -d "{\"token\":\"$TOKEN\",\"bvid\":\"BV1GJ411x7h7\",\"lang\":\"auto\"}"
+
+# 3) 健康检查
+curl -s "{BASE_URL}/api/health"
+```
+
+（`{BASE_URL}` 替换成本服务的实际域名，例如浏览器地址栏的 origin。）
+
+---
+
+## 8. Agent 执行流程（可直接照做）
+
+1. 从页面地址或调用方获得 `BASE_URL` 与 `AES_KEY`；
+2. 用第 2 节算法生成 token（每次请求重新生成，时间窗 60 秒）；
+3. `POST {BASE_URL}/api/subtitles`，body 为 `{token, bvid, page?, lang?}`；
+4. 处理响应：
+   - `200 + ok:true`：用 `data.cues` / `data.video` / `data.tracks`；
+   - `200 + empty:true`：告知用户该视频没有外挂字幕；
+   - `429`：读 `retry_after_seconds`，等待后重试；
+   - `401`：检查密钥/时钟，不要重试；
+   - `502/504`：退避重试 1~2 次，仍失败则报告 B 站风控/网络问题；
+5. 需要其他语言：从 `data.tracks` 选择 `lan`，用同一个 BVID 再请求一次；
+6. 需要文件：用第 6 节代码把 cues 转成 SRT / TXT。
+
+---
+
+## 9. 注意
+
+- 不要并发刷接口；遇到 `429` 或 `BILI_RISK_CONTROL` 请等待/降频，B 站 412 是 IP 级风控；
+- 不要记录或泄露 `AES_KEY`、token；
+- 本项目只请求 B 站公开接口，不提供登录、Cookie、付费内容绕过能力；
+- 接口和缓存策略可能随部署调整，以实际响应为准。
