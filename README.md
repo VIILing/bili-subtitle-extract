@@ -9,6 +9,9 @@
 
 > 原理参考了 `bili-toolkit` 的实测结论：字幕只需要 3 个匿名接口（`x/web-interface/view` → `x/v2/dm/view` → `subtitle_url`），
 > **不需要登录、Cookie、WBI 签名**。
+>
+> 与 B 站风控对抗的完整记录（412、socket 回退、view→pagelist 降级、诊断数据与备选方案）见
+> **[docs/anti-risk-control.md](docs/anti-risk-control.md)**。
 
 ---
 
@@ -236,6 +239,9 @@ Cloudflare Worker 用 `fetch()` 出站时会被强制附加 `cf-connecting-ip`�
 
 本地强制测试 socket 方式：在 `.dev.vars` 里写 `BILI_TRANSPORT=socket` 再 `pnpm dev`。
 
+> 为什么 view 接口即使走 socket 也会被风控、pagelist 降级细节、线上实测数据与后续备选方案，
+> 见 **[docs/anti-risk-control.md](docs/anti-risk-control.md)**。
+
 ## 7. 本地开发
 
 ```bash
@@ -286,6 +292,8 @@ pnpm wrangler d1 execute DB --local --command "SELECT cache_key FROM subtitle"
 │   ├── app.js        # 浏览器端 WebCrypto 生成 token + 展示/导出字幕
 │   └── style.css
 ├── test/             # vitest：鉴权、B 站解析、API 流程（假 Store/BiliClient）
+├── docs/
+│   └── anti-risk-control.md   # B 站风控对抗记录（412 / socket / pagelist，含实测数据）
 ├── scripts/mint-token.mjs
 ├── wrangler.jsonc
 └── package.json
