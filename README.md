@@ -293,7 +293,8 @@ pnpm wrangler d1 execute DB --local --command "SELECT cache_key FROM subtitle"
 │   ├── index.html
 │   ├── app.js        # 浏览器端 WebCrypto 生成 token + 展示/导出字幕
 │   ├── style.css
-│   └── skill.txt     # 面向 Agent 的 API/Skill 使用说明（部署后 /skill.txt）
+│   ├── skill.txt     # 面向 Agent 的 API/Skill 使用说明（部署后 /skill.txt）
+│   └── _headers      # 让 /skill.txt 以 text/plain; charset=utf-8 返回
 ├── test/             # vitest：鉴权、B 站解析、API 流程（假 Store/BiliClient）
 ├── docs/
 │   └── anti-risk-control.md   # B 站风控对抗记录（412 / socket / pagelist，含实测数据）

@@ -1,0 +1,4 @@
+# Cloudflare Workers 静态资源自定义响应头
+# 让纯文本 skill 以 UTF-8 显示，避免浏览器按 windows-1252 解码出现乱码
+/skill.txt
+  Content-Type: text/plain; charset=utf-8
